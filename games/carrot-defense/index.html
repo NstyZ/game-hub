@@ -10,8 +10,10 @@
   <div class="wrap">
     <header class="hud">
       <a class="back" href="../../">← 返回</a>
+      <button id="who" class="who-btn" title="点击改名"></button>
       <div class="stats">
         <span title="金币">💰 <b id="gold">150</b></span>
+        <span title="得分">⭐ <b id="score">0</b></span>
         <span title="萝卜血量">🥕 <b id="lives">10</b></span>
         <span title="波次">🌊 <b id="wave">0/6</b></span>
       </div>
@@ -20,6 +22,17 @@
 
     <div class="canvas-box">
       <canvas id="game" width="420" height="620"></canvas>
+
+      <!-- 用户名门:第一次进来必须先起名 -->
+      <div id="nameGate" class="over">
+        <div class="over-card">
+          <h2>🎮 报上名来</h2>
+          <p>排行榜上显示的名字</p>
+          <input id="nameInput" class="name-input" maxlength="12" placeholder="最多12个字">
+          <button id="nameOk" class="big-btn">进入游戏</button>
+        </div>
+      </div>
+
       <div id="over" class="over hidden">
         <div class="over-card">
           <h2 id="overTitle">游戏结束</h2>
@@ -33,6 +46,12 @@
     <div id="panel" class="panel hidden">
       <span id="panelInfo">选择一个塔</span>
       <div id="panelBtns"></div>
+    </div>
+
+    <!-- 全服排行榜 -->
+    <div class="board">
+      <h3>🏆 全服排行榜</h3>
+      <ol id="boardList"><li class="dim">加载中…</li></ol>
     </div>
 
     <p class="tip">点击路边的 ⭕ 空地建塔 · 箭塔单体快攻,炮塔范围溅射 · 怪物走到终点会咬萝卜</p>
@@ -91,11 +110,16 @@
     ].map((p) => ({ ...p, tower: null }));
 
     // ---------- 2. 游戏状态 ----------
-    let gold, lives, waveIdx, enemies, bullets, spawnQueue, spawnTimer, waveActive, over;
+    let gold, lives, waveIdx, enemies, bullets, spawnQueue, spawnTimer, waveActive, over, score;
     let selectedSlot = null;
 
+    // 排行榜云端存储(textdb.online 免费文本数据库,免注册)
+    const LB_KEY = "game-hub-carrot-lb-9x4k2m";
+    const LB_URL = `https://textdb.online/${LB_KEY}`;
+    let myName = localStorage.getItem("carrot-name") || "";
+
     function reset() {
-      gold = 150; lives = 10; waveIdx = 0;
+      gold = 150; lives = 10; waveIdx = 0; score = 0;
       enemies = []; bullets = [];
       spawnQueue = []; spawnTimer = 0; waveActive = false; over = false;
       SLOTS.forEach((s) => (s.tower = null));
@@ -109,9 +133,11 @@
     function updateHud() {
       $("gold").textContent = gold;
       $("lives").textContent = lives;
+      $("score").textContent = score;
       $("wave").textContent = `${waveIdx}/${WAVES.length}`;
+      $("who").textContent = myName ? `👤 ${myName}` : "👤 起名";
       const btn = $("startWave");
-      btn.disabled = waveActive || over || waveIdx >= WAVES.length;
+      btn.disabled = waveActive || over || waveIdx >= WAVES.length || !myName;
       btn.textContent = waveActive ? "战斗中…" : `开始第 ${waveIdx + 1} 波`;
     }
 
@@ -183,12 +209,15 @@
 
     function gameOver(win) {
       over = true;
+      // 最终得分:击杀得分 + (胜利奖励 500 + 每剩余 1 点萝卜血 50 分)
+      const final = win ? score + 500 + lives * 50 : score;
       $("overTitle").textContent = win ? "🏆 胜利!" : "游戏结束";
       $("overDesc").textContent = win
-        ? `萝卜守住了!共击退 ${WAVES.length} 波怪物`
-        : "萝卜被吃掉了…";
+        ? `萝卜守住了!最终得分 ${final},已提交排行榜`
+        : `得分 ${final},已提交排行榜`;
       document.getElementById("over").classList.remove("hidden");
       updateHud();
+      submitScore(myName, final);
     }
     $("startWave").addEventListener("click", startWave);
     $("restart").addEventListener("click", reset);
@@ -268,6 +297,7 @@
         if (e.hp <= 0 && !e.dead) {
           e.dead = true;
           gold += e.gold;
+          score += e.gold; // 击杀也计分
         }
       }
       enemies = enemies.filter((e) => !e.dead);
@@ -389,6 +419,87 @@
       }
     }
 
+    // ---------- 6.5 用户名门 + 排行榜 ----------
+    function initNameGate() {
+      $("nameGate").classList.toggle("hidden", !!myName);
+      $("who").textContent = myName ? `👤 ${myName}` : "👤 起名";
+      updateHud();
+    }
+
+    $("nameOk").addEventListener("click", () => {
+      const v = $("nameInput").value.trim().slice(0, 12);
+      if (!v) { $("nameInput").focus(); return; }
+      myName = v;
+      localStorage.setItem("carrot-name", v); // 存起来,下次不用再输
+      initNameGate();
+    });
+    $("nameInput").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") $("nameOk").click();
+    });
+
+    // 点"起名"按钮可以改名
+    $("who").addEventListener("click", () => {
+      localStorage.removeItem("carrot-name");
+      myName = "";
+      $("nameInput").value = "";
+      $("nameGate").classList.remove("hidden");
+      updateHud();
+    });
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    }
+
+    function renderBoard(list) {
+      const el = $("boardList");
+      if (!list.length) {
+        el.innerHTML = '<li class="dim">还没有人上榜,快抢第一!</li>';
+        return;
+      }
+      const medals = ["🥇", "🥈", "🥉"];
+      el.innerHTML = list.slice(0, 10).map((s, i) =>
+        `<li><span class="rank">${medals[i] || (i + 1)}</span>${escapeHtml(s.name)}<b>${s.score}</b></li>`
+      ).join("");
+    }
+
+    async function loadBoard() {
+      try {
+        const text = await (await fetch(LB_URL)).text();
+        const data = text ? JSON.parse(text) : { scores: [] };
+        renderBoard(Array.isArray(data.scores) ? data.scores : []);
+      } catch (e) {
+        $("boardList").innerHTML = '<li class="dim">排行榜暂时打不开…</li>';
+      }
+    }
+
+    // 提交分数:读云端 → 同名保留最高分 → 排序取前20 → 写回
+    async function submitScore(name, sc) {
+      if (!name || typeof sc !== "number") return;
+      try {
+        const text = await (await fetch(LB_URL)).text();
+        let data = text ? JSON.parse(text) : { scores: [] };
+        let list = Array.isArray(data.scores) ? data.scores.filter((s) => s && s.name) : [];
+        const prev = list.find((s) => s.name === name);
+        if (prev) {
+          if (prev.score >= sc) return; // 没破自己的纪录,不提交
+          prev.score = sc;
+          prev.time = new Date().toLocaleDateString("zh-CN");
+        } else {
+          list.push({ name, score: sc, time: new Date().toLocaleDateString("zh-CN") });
+        }
+        list.sort((a, b) => b.score - a.score);
+        list = list.slice(0, 20);
+        // 用 GET 写入(POST 会被 301 重定向导致写入失败)
+        await fetch(
+          `https://textdb.online/update/?key=${LB_KEY}&value=${encodeURIComponent(JSON.stringify({ scores: list }))}`
+        );
+        renderBoard(list);
+      } catch (e) {
+        // 网络异常时静默失败,不影响本地游戏
+      }
+    }
+
     // ---------- 7. 点击画布选空地 ----------
     canvas.addEventListener("pointerdown", (e) => {
       const rect = canvas.getBoundingClientRect();
@@ -409,6 +520,8 @@
       requestAnimationFrame(loop);
     }
     reset();
+    initNameGate();
+    loadBoard();
     requestAnimationFrame(loop);
   </script>
 </body>
