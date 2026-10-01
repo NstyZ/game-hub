@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+  <title>保卫萝卜 · 小游戏合集</title>
+  <link rel="stylesheet" href="../style-carrot.css">
+</head>
+<body>
+  <div class="wrap">
+    <header class="hud">
+      <a class="back" href="../../">← 返回</a>
+      <div class="stats">
+        <span title="金币">💰 <b id="gold">150</b></span>
+        <span title="萝卜血量">🥕 <b id="lives">10</b></span>
+        <span title="波次">🌊 <b id="wave">0/6</b></span>
+      </div>
+      <button id="startWave" class="start-btn">开始第 1 波</button>
+    </header>
+
+    <div class="canvas-box">
+      <canvas id="game" width="420" height="620"></canvas>
+      <div id="over" class="over hidden">
+        <div class="over-card">
+          <h2 id="overTitle">游戏结束</h2>
+          <p id="overDesc">萝卜被吃掉了…</p>
+          <button id="restart" class="big-btn">再来一局</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 选中建塔点后弹出的操作面板 -->
+    <div id="panel" class="panel hidden">
+      <span id="panelInfo">选择一个塔</span>
+      <div id="panelBtns"></div>
+    </div>
+
+    <p class="tip">点击路边的 ⭕ 空地建塔 · 箭塔单体快攻,炮塔范围溅射 · 怪物走到终点会咬萝卜</p>
+  </div>
+
+  <script>
+    // =====================================================
+    // 保卫萝卜(基础版)—— 单文件塔防游戏
+    // 结构:配置 → 状态 → 建塔 → 波次 → 更新 → 绘制 → 主循环
+    // =====================================================
+
+    const W = 420, H = 620;
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d");
+
+    // ---------- 1. 配置 ----------
+
+    // 怪物图鉴:血量 / 速度 / 赏金 / 大小
+    const MOBS = {
+      ant:      { emoji: "🐜", hp: 32,  speed: 58, gold: 8,   r: 14 },
+      bug:      { emoji: "🐛", hp: 70,  speed: 42, gold: 12,  r: 16 },
+      cricket:  { emoji: "🦗", hp: 44,  speed: 92, gold: 12,  r: 14 },
+      scorpion: { emoji: "🦂", hp: 140, speed: 48, gold: 22,  r: 18 },
+      boss:     { emoji: "🐲", hp: 950, speed: 34, gold: 250, r: 26 },
+    };
+
+    // 波次表:每波按顺序刷这些怪,每 900ms 出一只
+    const WAVES = [
+      ["ant","ant","ant","ant","ant","ant","ant","ant"],
+      ["ant","ant","ant","bug","ant","bug","ant","bug","bug"],
+      ["cricket","bug","cricket","bug","cricket","cricket","bug","cricket","bug","cricket"],
+      ["scorpion","ant","scorpion","ant","scorpion","ant","scorpion","ant","ant","ant"],
+      ["scorpion","cricket","scorpion","cricket","bug","scorpion","cricket","bug","scorpion"],
+      ["boss","cricket","cricket","cricket","scorpion","scorpion","scorpion"],
+    ];
+
+    // 塔图鉴
+    const TOWERS = {
+      arrow:  { emoji: "🏹", name: "箭塔", cost: 50,  range: 95,  rate: 480,  damage: 14, bulletSpeed: 340 },
+      cannon: { emoji: "💣", name: "炮塔", cost: 120, range: 115, rate: 1250, damage: 34, bulletSpeed: 240, splash: 55 },
+    };
+
+    // 怪物行进路线(拐点坐标),终点是萝卜
+    const PATH = [
+      { x: -30, y: 120 }, { x: 120, y: 120 }, { x: 120, y: 260 },
+      { x: 330, y: 260 }, { x: 330, y: 420 }, { x: 90, y: 420 },
+      { x: 90, y: 540 },  { x: 400, y: 540 },
+    ];
+    const GOAL = PATH[PATH.length - 1];
+
+    // 路边的建塔空地
+    const SLOTS = [
+      { x: 30,  y: 60 },  { x: 230, y: 180 }, { x: 370, y: 170 },
+      { x: 50,  y: 300 }, { x: 200, y: 350 }, { x: 45,  y: 505 },
+      { x: 240, y: 470 }, { x: 380, y: 470 },
+    ].map((p) => ({ ...p, tower: null }));
+
+    // ---------- 2. 游戏状态 ----------
+    let gold, lives, waveIdx, enemies, bullets, spawnQueue, spawnTimer, waveActive, over;
+    let selectedSlot = null;
+
+    function reset() {
+      gold = 150; lives = 10; waveIdx = 0;
+      enemies = []; bullets = [];
+      spawnQueue = []; spawnTimer = 0; waveActive = false; over = false;
+      SLOTS.forEach((s) => (s.tower = null));
+      selectedSlot = null;
+      hidePanel();
+      document.getElementById("over").classList.add("hidden");
+      updateHud();
+    }
+
+    const $ = (id) => document.getElementById(id);
+    function updateHud() {
+      $("gold").textContent = gold;
+      $("lives").textContent = lives;
+      $("wave").textContent = `${waveIdx}/${WAVES.length}`;
+      const btn = $("startWave");
+      btn.disabled = waveActive || over || waveIdx >= WAVES.length;
+      btn.textContent = waveActive ? "战斗中…" : `开始第 ${waveIdx + 1} 波`;
+    }
+
+    // ---------- 3. 建塔 / 卖塔 ----------
+    function showPanel(slot) {
+      selectedSlot = slot;
+      const panel = $("panel"), info = $("panelInfo"), btns = $("panelBtns");
+      btns.innerHTML = "";
+      panel.classList.remove("hidden");
+
+      if (!slot.tower) {
+        info.textContent = `空地 (${slot.x}, ${slot.y}) —— 选一座塔:`;
+        for (const [key, t] of Object.entries(TOWERS)) {
+          const b = document.createElement("button");
+          b.textContent = `${t.emoji} ${t.name} 💰${t.cost}`;
+          b.disabled = gold < t.cost;
+          b.onclick = () => buyTower(key);
+          btns.appendChild(b);
+        }
+      } else {
+        const t = TOWERS[slot.tower.key];
+        info.textContent = `${t.emoji} ${t.name}`;
+        const sell = document.createElement("button");
+        sell.textContent = `卖出 💰${Math.floor(t.cost * 0.6)}`;
+        sell.onclick = sellTower;
+        btns.appendChild(sell);
+      }
+    }
+    function hidePanel() {
+      selectedSlot = null;
+      $("panel").classList.add("hidden");
+    }
+    function buyTower(key) {
+      const t = TOWERS[key];
+      if (gold < t.cost || !selectedSlot || selectedSlot.tower) return;
+      gold -= t.cost;
+      selectedSlot.tower = { key, cd: 0 };
+      updateHud();
+      showPanel(selectedSlot); // 刷新面板为卖出状态
+    }
+    function sellTower() {
+      if (!selectedSlot || !selectedSlot.tower) return;
+      gold += Math.floor(TOWERS[selectedSlot.tower.key].cost * 0.6);
+      selectedSlot.tower = null;
+      updateHud();
+      showPanel(selectedSlot);
+    }
+
+    // ---------- 4. 波次 ----------
+    function startWave() {
+      if (waveActive || over || waveIdx >= WAVES.length) return;
+      spawnQueue = [...WAVES[waveIdx]];
+      spawnTimer = 0;
+      waveActive = true;
+      updateHud();
+    }
+
+    function endWave() {
+      waveActive = false;
+      waveIdx += 1;
+      gold += 40 + waveIdx * 10; // 通关奖励
+      if (waveIdx >= WAVES.length) {
+        gameOver(true);
+      } else {
+        $("panelInfo").textContent = `第 ${waveIdx} 波完成!奖励已到账`;
+      }
+      updateHud();
+    }
+
+    function gameOver(win) {
+      over = true;
+      $("overTitle").textContent = win ? "🏆 胜利!" : "游戏结束";
+      $("overDesc").textContent = win
+        ? `萝卜守住了!共击退 ${WAVES.length} 波怪物`
+        : "萝卜被吃掉了…";
+      document.getElementById("over").classList.remove("hidden");
+      updateHud();
+    }
+    $("startWave").addEventListener("click", startWave);
+    $("restart").addEventListener("click", reset);
+
+    // ---------- 5. 每帧更新 ----------
+    function update(dt) {
+      // 5.1 刷怪
+      if (waveActive && spawnQueue.length) {
+        spawnTimer += dt;
+        if (spawnTimer >= 0.9) {
+          spawnTimer = 0;
+          spawnMob(spawnQueue.shift());
+        }
+      }
+
+      // 5.2 怪物沿路径走
+      for (const e of enemies) {
+        const target = PATH[e.wp];
+        const dx = target.x - e.x, dy = target.y - e.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist < 4) {
+          if (e.wp >= PATH.length - 1) continue; // 已到终点,下面结算
+          e.wp += 1;
+        } else {
+          e.x += (dx / dist) * e.speed * dt;
+          e.y += (dy / dist) * e.speed * dt;
+          e.dist += e.speed * dt; // 记录走过路程,用于"打最前面的怪"
+        }
+      }
+
+      // 5.3 到达终点的怪物咬萝卜
+      const arrived = enemies.filter((e) => e.wp >= PATH.length - 1 && Math.hypot(GOAL.x - e.x, GOAL.y - e.y) < 6);
+      for (const e of arrived) {
+        lives -= 1;
+        e.dead = true;
+        if (lives <= 0) { lives = 0; gameOver(false); }
+      }
+      enemies = enemies.filter((e) => !e.dead);
+      updateHud();
+
+      // 5.4 塔索敌开火
+      for (const slot of SLOTS) {
+        const t = slot.tower;
+        if (!t) continue;
+        const cfg = TOWERS[t.key];
+        t.cd -= dt * 1000;
+        // 找射程内走得最远的怪
+        let target = null;
+        for (const e of enemies) {
+          if (Math.hypot(e.x - slot.x, e.y - slot.y) <= cfg.range) {
+            if (!target || e.dist > target.dist) target = e;
+          }
+        }
+        if (target && t.cd <= 0) {
+          t.cd = cfg.rate;
+          bullets.push({ x: slot.x, y: slot.y - 14, target, cfg, key: t.key });
+        }
+      }
+
+      // 5.5 子弹飞行与命中
+      for (const b of bullets) {
+        if (b.target.dead) { b.done = true; continue; }
+        const dx = b.target.x - b.x, dy = b.target.y - b.y;
+        const d = Math.hypot(dx, dy);
+        if (d < 10) {
+          b.done = true;
+          hit(b);
+        } else {
+          b.x += (dx / d) * b.cfg.bulletSpeed * dt;
+          b.y += (dy / d) * b.cfg.bulletSpeed * dt;
+        }
+      }
+      bullets = bullets.filter((b) => !b.done);
+
+      // 5.6 击杀结算
+      for (const e of enemies) {
+        if (e.hp <= 0 && !e.dead) {
+          e.dead = true;
+          gold += e.gold;
+        }
+      }
+      enemies = enemies.filter((e) => !e.dead);
+
+      // 5.7 一波打完
+      if (waveActive && !spawnQueue.length && !enemies.length) endWave();
+    }
+
+    function spawnMob(type) {
+      const m = MOBS[type];
+      enemies.push({
+        type, emoji: m.emoji, hp: m.hp, maxHp: m.hp,
+        speed: m.speed, gold: m.gold, r: m.r,
+        x: PATH[0].x, y: PATH[0].y, wp: 1, dist: 0,
+      });
+    }
+
+    function hit(b) {
+      if (b.cfg.splash) {
+        // 炮塔:范围溅射
+        for (const e of enemies) {
+          if (Math.hypot(e.x - b.target.x, e.y - b.target.y) <= b.cfg.splash) e.hp -= b.cfg.damage;
+        }
+      } else {
+        b.target.hp -= b.cfg.damage;
+      }
+    }
+
+    // ---------- 6. 绘制 ----------
+    function draw() {
+      // 草地
+      ctx.fillStyle = "#79b851";
+      ctx.fillRect(0, 0, W, H);
+
+      // 泥土路(粗线连起所有拐点)
+      ctx.strokeStyle = "#d9b380";
+      ctx.lineWidth = 38;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(PATH[0].x, PATH[0].y);
+      for (const p of PATH.slice(1)) ctx.lineTo(p.x, p.y);
+      ctx.stroke();
+      // 路中间的浅色小径
+      ctx.strokeStyle = "#e8c99a";
+      ctx.lineWidth = 28;
+      ctx.stroke();
+
+      // 装饰小树
+      ctx.font = "22px serif";
+      for (const [tx, ty] of [[390,60],[280,60],[30,380],[380,350],[30,580],[300,580]]) {
+        ctx.fillText("🌲", tx, ty);
+      }
+
+      // 终点萝卜
+      ctx.font = "30px serif";
+      ctx.fillText("🥕", GOAL.x - 16, GOAL.y + 10);
+
+      // 建塔空地
+      for (const s of SLOTS) {
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, 16, 0, Math.PI * 2);
+        if (s.tower) {
+          ctx.fillStyle = "rgba(255,255,255,0.55)";
+          ctx.fill();
+          ctx.font = "20px serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(TOWERS[s.tower.key].emoji, s.x, s.y + 1);
+        } else {
+          ctx.strokeStyle = "rgba(255,255,255,0.8)";
+          ctx.lineWidth = 2;
+          ctx.setLineDash([4, 3]);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      }
+
+      // 选中空地:显示建造范围提示
+      if (selectedSlot && !selectedSlot.tower) {
+        ctx.beginPath();
+        ctx.arc(selectedSlot.x, selectedSlot.y, 20, 0, Math.PI * 2);
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 3;
+        ctx.stroke();
+      }
+
+      // 选中塔:显示射程圈
+      if (selectedSlot && selectedSlot.tower) {
+        ctx.beginPath();
+        ctx.arc(selectedSlot.x, selectedSlot.y, TOWERS[selectedSlot.tower.key].range, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(255,255,255,0.15)";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(255,255,255,0.6)";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+
+      // 怪物 + 血条
+      for (const e of enemies) {
+        ctx.font = `${e.r * 2}px serif`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(e.emoji, e.x, e.y);
+        // 血条
+        const bw = e.r * 2;
+        ctx.fillStyle = "rgba(0,0,0,0.45)";
+        ctx.fillRect(e.x - bw / 2, e.y - e.r - 9, bw, 5);
+        ctx.fillStyle = e.hp / e.maxHp > 0.4 ? "#6dd66d" : "#ff6b6b";
+        ctx.fillRect(e.x - bw / 2, e.y - e.r - 9, bw * (e.hp / e.maxHp), 5);
+      }
+
+      // 子弹
+      for (const b of bullets) {
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, b.key === "cannon" ? 6 : 4, 0, Math.PI * 2);
+        ctx.fillStyle = b.key === "cannon" ? "#2c3e50" : "#f39c12";
+        ctx.fill();
+      }
+    }
+
+    // ---------- 7. 点击画布选空地 ----------
+    canvas.addEventListener("pointerdown", (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const x = (e.clientX - rect.left) * (W / rect.width);
+      const y = (e.clientY - rect.top) * (H / rect.height);
+      const slot = SLOTS.find((s) => Math.hypot(s.x - x, s.y - y) < 22);
+      if (slot) showPanel(slot);
+      else hidePanel();
+    });
+
+    // ---------- 8. 主循环 ----------
+    let lastT = performance.now();
+    function loop(now) {
+      const dt = Math.min((now - lastT) / 1000, 0.05); // 秒,防止切标签页后暴走
+      lastT = now;
+      if (!over) update(dt);
+      draw();
+      requestAnimationFrame(loop);
+    }
+    reset();
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
