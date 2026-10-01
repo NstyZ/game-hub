@@ -1,0 +1,68 @@
+/* 游戏集合站全站样式 */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: linear-gradient(160deg, #1a1a2e 0%, #16213e 100%);
+  color: #eaeaea;
+  min-height: 100vh;
+}
+
+/* 顶部标语 */
+.hero { text-align: center; padding: 64px 16px 40px; }
+.hero h1 { font-size: 40px; margin-bottom: 10px; }
+.hero p { color: #8a93b5; font-size: 16px; }
+
+/* 游戏卡片网格 */
+.game-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 24px;
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 0 24px 64px;
+}
+
+.game-card {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  background: #21304f;
+  border-radius: 16px;
+  overflow: hidden;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+.game-card:hover {
+  transform: translateY(-6px);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+}
+
+.game-cover {
+  height: 150px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 72px;
+  background: linear-gradient(135deg, #f9536b, #fda085);
+}
+.cover-melon { background: linear-gradient(135deg, #ff9a9e 0%, #fad0c4 100%); }
+
+.game-info { padding: 18px 20px 22px; }
+.game-info h2 { font-size: 20px; margin-bottom: 8px; }
+.game-info p { font-size: 14px; color: #aab4d4; line-height: 1.6; margin-bottom: 14px; }
+
+.play-btn {
+  display: inline-block;
+  background: #f9536b;
+  color: #fff;
+  padding: 8px 18px;
+  border-radius: 20px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* 未开放的卡片弱化显示 */
+.coming-soon { opacity: 0.55; pointer-events: none; }
+
+.footer { text-align: center; color: #5c688c; font-size: 13px; padding-bottom: 40px; }
