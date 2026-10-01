@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+  <title>合成大西瓜 · 小游戏合集</title>
+  <link rel="stylesheet" href="../style-melon.css">
+</head>
+<body>
+  <div class="wrap">
+    <header class="hud">
+      <a class="back" href="../../">← 返回</a>
+      <button id="who" class="who-btn" title="点击改名"></button>
+      <div class="scores">
+        <div class="score-box">得分<span id="score">0</span></div>
+        <div class="score-box">最高<span id="best">0</span></div>
+      </div>
+    </header>
+
+    <div class="canvas-box">
+      <!-- 游戏画面就画在这个画布上 -->
+      <canvas id="game" width="400" height="640"></canvas>
+
+      <!-- 用户名门:第一次进来必须先起名 -->
+      <div id="nameGate" class="over">
+        <div class="over-card">
+          <h2>🎮 报上名来</h2>
+          <p>排行榜上显示的名字</p>
+          <input id="nameInput" class="name-input" maxlength="12" placeholder="最多12个字">
+          <button id="nameOk" class="big-btn">进入游戏</button>
+        </div>
+      </div>
+
+      <!-- 顶部信息条 -->
+      <div class="topbar">
+        <span>下一个:<b id="next">🍉</b></span>
+        <button id="restart" class="mini-btn">重开</button>
+      </div>
+
+      <!-- 游戏结束遮罩 -->
+      <div id="over" class="over hidden">
+        <div class="over-card">
+          <h2>游戏结束</h2>
+          <p>本局得分 <b id="finalScore">0</b></p>
+          <button id="again" class="big-btn">再来一局</button>
+        </div>
+      </div>
+    </div>
+
+    <p class="tip">移动鼠标/手指瞄准,点击放下 · 两个一样大的西瓜相撞会合成更大的西瓜</p>
+
+    <!-- 全服排行榜 -->
+    <div class="board">
+      <h3>🏆 全服排行榜</h3>
+      <ol id="boardList"><li class="dim">加载中…</li></ol>
+    </div>
+  </div>
+
+  <!-- Matter.js:现成的 2D 物理引擎,负责重力、碰撞这些真实物理效果 -->
+  <script src="https://cdn.jsdelivr.net/npm/matter-js@0.19.0/build/matter.min.js"></script>
+  <script>
+    const { Engine, Bodies, Body, Composite, Events } = Matter;
+
+    // ================= 游戏配置 =================
+    const W = 400, H = 640;          // 画布尺寸
+    const WALL = 14;                  // 左右墙厚度
+    const FLOOR_Y = H - 20;           // 地面顶部位置
+    const LINE_Y = 130;               // 危险线:水果堆过这条线太久就输
+
+    // 11 级西瓜:从小到大,全是 🍉,靠半径大小和底色深浅区分
+    const FRUITS = [
+      { emoji: "🍉", r: 14 },  // 西瓜崽
+      { emoji: "🍉", r: 19 },
+      { emoji: "🍉", r: 26 },
+      { emoji: "🍉", r: 33 },
+      { emoji: "🍉", r: 41 },
+      { emoji: "🍉", r: 50 },
+      { emoji: "🍉", r: 60 },
+      { emoji: "🍉", r: 71 },
+      { emoji: "🍉", r: 83 },
+      { emoji: "🍉", r: 96 },
+      { emoji: "🍉", r: 110 }, // 大西瓜!
+    ];
+    const MAX_LEVEL = FRUITS.length - 1;
+    // 合成第 i 级水果的得分(越大越值钱)
+    const POINTS = FRUITS.map((_, i) => (i + 1) * (i + 2) / 2);
+
+    // ================= 物理世界 =================
+    const engine = Engine.create();
+    const world = engine.world;
+    engine.gravity.y = 1.1; // 重力比默认稍大,手感更"沉"
+
+    // 三面墙:左、右、地面
+    const wallOpts = { isStatic: true, friction: 0.6 };
+    Composite.add(world, [
+      Bodies.rectangle(WALL / 2, H / 2, WALL, H * 2, wallOpts),
+      Bodies.rectangle(W - WALL / 2, H / 2, WALL, H * 2, wallOpts),
+      Bodies.rectangle(W / 2, FLOOR_Y + 40, W, 80, wallOpts),
+    ]);
+
+    // ================= 游戏状态 =================
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d");
+
+    let fruits = [];            // 场上所有水果(物理刚体)
+    let score = 0;
+    let best = Number(localStorage.getItem("melon-best") || 0);
+    let gameOver = false;
+    let dropX = W / 2;          // 当前瞄准位置
+    let current = 0;            // 手里水果的等级
+    let next = 0;               // 下一个水果的等级
+    let lastDropAt = 0;         // 上次放下的时间(用来限制连点)
+    let dangerSince = 0;        // 水果越过危险线的起始时刻
+    let pops = [];              // 合成时的"波纹"特效
+
+    // 排行榜云端存储(textdb.online 免费文本数据库,免注册)
+    const LB_KEY = "game-hub-melon-lb-5p8j3n7q1z";
+    const LB_URL = `https://textdb.online/${LB_KEY}`;
+    let myName = localStorage.getItem("melon-name") || "";
+
+    const $score = document.getElementById("score");
+    const $best = document.getElementById("best");
+    const $next = document.getElementById("next");
+    $best.textContent = best;
+
+    function randLevel() {
+      // 只随机出前 5 种小水果,权重靠前的更大
+      return Math.floor(Math.random() * 5);
+    }
+
+    function makeFruit(level, x, y) {
+      const r = FRUITS[level].r;
+      const body = Bodies.circle(x, y, r, {
+        restitution: 0.15,   // 弹性
+        friction: 0.4,
+        density: 0.001,
+      });
+      body.plugin = { level, born: performance.now() };
+      Composite.add(world, body);
+      fruits.push(body);
+      return body;
+    }
+
+    function drop() {
+      if (gameOver) return;
+      const now = performance.now();
+      if (now - lastDropAt < 480) return; // 别点太快
+      lastDropAt = now;
+
+      const r = FRUITS[current].r;
+      const x = Math.min(Math.max(dropX, WALL + r + 2), W - WALL - r - 2);
+      makeFruit(current, x, LINE_Y - 30);
+      current = next;
+      next = randLevel();
+      $next.textContent = FRUITS[next].emoji;
+    }
+
+    // ================= 合成逻辑(游戏的核心!) =================
+    Events.on(engine, "collisionStart", (e) => {
+      for (const pair of e.pairs) {
+        const a = pair.bodyA, b = pair.bodyB;
+        if (a.plugin?.level === undefined || b.plugin?.level === undefined) continue;
+        if (a.plugin.level !== b.plugin.level) continue;
+        if (a.plugin.merging || b.plugin.merging) continue;
+
+        const level = a.plugin.level;
+        const mx = (a.position.x + b.position.x) / 2;
+        const my = (a.position.y + b.position.y) / 2;
+
+        // 两个都移除
+        a.plugin.merging = b.plugin.merging = true;
+        Composite.remove(world, [a, b]);
+        fruits = fruits.filter((f) => f !== a && f !== b);
+
+        if (level < MAX_LEVEL) {
+          // 合成更大的一级
+          makeFruit(level + 1, mx, my);
+          score += POINTS[level + 1];
+          pops.push({ x: mx, y: my, at: performance.now() });
+        } else {
+          // 两个大西瓜相撞:超高奖励!
+          score += 2000;
+          pops.push({ x: mx, y: my, at: performance.now(), big: true });
+        }
+        $score.textContent = score;
+        if (score > best) {
+          best = score;
+          $best.textContent = best;
+          localStorage.setItem("melon-best", best);
+        }
+      }
+    });
+
+    // ================= 输入:鼠标 / 触屏 =================
+    function toCanvasX(clientX) {
+      const rect = canvas.getBoundingClientRect();
+      return (clientX - rect.left) * (W / rect.width);
+    }
+    canvas.addEventListener("pointermove", (e) => { dropX = toCanvasX(e.clientX); });
+    canvas.addEventListener("pointerdown", (e) => { dropX = toCanvasX(e.clientX); drop(); });
+    document.getElementById("restart").addEventListener("click", reset);
+    document.getElementById("again").addEventListener("click", reset);
+
+    // ================= 游戏结束判定 =================
+    function checkGameOver(now) {
+      let danger = false;
+      for (const f of fruits) {
+        if (now - f.plugin.born < 1500) continue; // 刚出生的豁免
+        if (f.position.y - FRUITS[f.plugin.level].r < LINE_Y) danger = true;
+      }
+      if (danger) {
+        if (!dangerSince) dangerSince = now;
+        else if (now - dangerSince > 1800) endGame();
+      } else {
+        dangerSince = 0;
+      }
+    }
+
+    function endGame() {
+      gameOver = true;
+      document.getElementById("finalScore").textContent = score;
+      document.getElementById("over").classList.remove("hidden");
+      submitScore(myName, score);
+    }
+
+    // ================= 用户名门 + 排行榜 =================
+    function initNameGate() {
+      document.getElementById("nameGate").classList.toggle("hidden", !!myName);
+      document.getElementById("who").textContent = myName ? `👤 ${myName}` : "👤 起名";
+    }
+
+    document.getElementById("nameOk").addEventListener("click", () => {
+      const v = document.getElementById("nameInput").value.trim().slice(0, 12);
+      if (!v) { document.getElementById("nameInput").focus(); return; }
+      myName = v;
+      localStorage.setItem("melon-name", v); // 存起来,下次不用再输
+      initNameGate();
+    });
+    document.getElementById("nameInput").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") document.getElementById("nameOk").click();
+    });
+
+    // 点"起名"按钮可以改名
+    document.getElementById("who").addEventListener("click", () => {
+      localStorage.removeItem("melon-name");
+      myName = "";
+      document.getElementById("nameInput").value = "";
+      document.getElementById("nameGate").classList.remove("hidden");
+    });
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    }
+
+    function renderBoard(list) {
+      const el = document.getElementById("boardList");
+      if (!list.length) {
+        el.innerHTML = '<li class="dim">还没有人上榜,快抢第一!</li>';
+        return;
+      }
+      const medals = ["🥇", "🥈", "🥉"];
+      el.innerHTML = list.slice(0, 10).map((s, i) =>
+        `<li><span class="rank">${medals[i] || (i + 1)}</span>${escapeHtml(s.name)}<b>${s.score}</b></li>`
+      ).join("");
+    }
+
+    async function loadBoard() {
+      try {
+        const text = await (await fetch(LB_URL)).text();
+        const data = text ? JSON.parse(text) : { scores: [] };
+        renderBoard(Array.isArray(data.scores) ? data.scores : []);
+      } catch (e) {
+        document.getElementById("boardList").innerHTML = '<li class="dim">排行榜暂时打不开…</li>';
+      }
+    }
+
+    // 提交分数:读云端 → 同名保留最高分 → 排序取前20 → 写回
+    async function submitScore(name, sc) {
+      if (!name || typeof sc !== "number") return;
+      try {
+        const text = await (await fetch(LB_URL)).text();
+        let data = text ? JSON.parse(text) : { scores: [] };
+        let list = Array.isArray(data.scores) ? data.scores.filter((s) => s && s.name) : [];
+        const prev = list.find((s) => s.name === name);
+        if (prev) {
+          if (prev.score >= sc) return; // 没破自己的纪录,不提交
+          prev.score = sc;
+          prev.time = new Date().toLocaleDateString("zh-CN");
+        } else {
+          list.push({ name, score: sc, time: new Date().toLocaleDateString("zh-CN") });
+        }
+        list.sort((a, b) => b.score - a.score);
+        list = list.slice(0, 20);
+        // 用 GET 写入(POST 会被 301 重定向导致写入失败)
+        await fetch(
+          `https://textdb.online/update/?key=${LB_KEY}&value=${encodeURIComponent(JSON.stringify({ scores: list }))}`
+        );
+        renderBoard(list);
+      } catch (e) {
+        // 网络异常时静默失败,不影响本地游戏
+      }
+    }
+
+    function reset() {
+      Composite.remove(world, fruits);
+      fruits = [];
+      score = 0; gameOver = false; dangerSince = 0; pops = [];
+      $score.textContent = 0;
+      current = randLevel();
+      next = randLevel();
+      $next.textContent = FRUITS[next].emoji;
+      document.getElementById("over").classList.add("hidden");
+    }
+    reset();
+
+    // ================= 画面绘制 =================
+    function drawFruit(f) {
+      const { level } = f.plugin;
+      const r = FRUITS[level].r;
+      const { x, y } = f.position;
+
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(f.angle);
+
+      // 底色圆
+      const grad = ctx.createRadialGradient(-r * 0.3, -r * 0.3, r * 0.2, 0, 0, r);
+      grad.addColorStop(0, "#ffffff");
+      grad.addColorStop(0.12, PALETTE[level].light);
+      grad.addColorStop(1, PALETTE[level].dark);
+      ctx.beginPath();
+      ctx.arc(0, 0, r, 0, Math.PI * 2);
+      ctx.fillStyle = grad;
+      ctx.fill();
+      ctx.restore();
+
+      // emoji 画在正中(不随刚体旋转,看起来更稳定)
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.font = `${r * 1.5}px serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(FRUITS[level].emoji, 0, r * 0.06);
+      ctx.restore();
+    }
+
+    // 每级西瓜的底色(嫩绿 → 深绿,越大越深)
+    const PALETTE = [
+      { light: "#d5f5e3", dark: "#82e0aa" },
+      { light: "#c8f0d8", dark: "#6fd68d" },
+      { light: "#b5ebc6", dark: "#58d68d" },
+      { light: "#a3e6b8", dark: "#45c97a" },
+      { light: "#96e2ac", dark: "#33b964" },
+      { light: "#88db9f", dark: "#27ae60" },
+      { light: "#7dcea0", dark: "#1e8449" },
+      { light: "#72c695", dark: "#196f3d" },
+      { light: "#67b98a", dark: "#166035" },
+      { light: "#5cad7f", dark: "#145a32" },
+      { light: "#52a174", dark: "#0e4d24" },
+    ];
+
+    function draw(now) {
+      // 背景
+      ctx.fillStyle = "#fef3e2";
+      ctx.fillRect(0, 0, W, H);
+
+      // 墙和地面
+      ctx.fillStyle = "#e8b04b";
+      ctx.fillRect(0, 0, WALL, H);
+      ctx.fillRect(W - WALL, 0, WALL, H);
+      ctx.fillRect(0, FLOOR_Y, W, H - FLOOR_Y);
+
+      // 危险线
+      ctx.strokeStyle = "rgba(220, 80, 80, 0.5)";
+      ctx.setLineDash([6, 6]);
+      ctx.beginPath();
+      ctx.moveTo(WALL, LINE_Y);
+      ctx.lineTo(W - WALL, LINE_Y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // 所有水果
+      for (const f of fruits) drawFruit(f);
+
+      // 手里拿着、还没放下的水果(跟随着瞄准位置)
+      if (!gameOver) {
+        const r = FRUITS[current].r;
+        const x = Math.min(Math.max(dropX, WALL + r + 2), W - WALL - r - 2);
+        ctx.save();
+        ctx.globalAlpha = 0.85;
+        ctx.font = `${r * 1.5}px serif`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(FRUITS[current].emoji, x, LINE_Y - 30);
+        ctx.restore();
+
+        // 瞄准辅助线
+        ctx.strokeStyle = "rgba(0,0,0,0.08)";
+        ctx.beginPath();
+        ctx.moveTo(x, LINE_Y);
+        ctx.lineTo(x, FLOOR_Y);
+        ctx.stroke();
+      }
+
+      // 合成波纹特效
+      pops = pops.filter((p) => now - p.at < 450);
+      for (const p of pops) {
+        const t = (now - p.at) / 450;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 10 + t * (p.big ? 160 : 60), 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(249, 83, 107, ${1 - t})`;
+        ctx.lineWidth = 3 * (1 - t) + 1;
+        ctx.stroke();
+      }
+    }
+
+    // ================= 主循环 =================
+    let lastT = performance.now();
+    function loop(now) {
+      const dt = now - lastT;
+      lastT = now;
+      Engine.update(engine, Math.min(dt, 33));
+      if (!gameOver) checkGameOver(now);
+      draw(now);
+      requestAnimationFrame(loop);
+    }
+    initNameGate();
+    loadBoard();
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>

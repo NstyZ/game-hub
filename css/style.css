@@ -46,6 +46,7 @@ body {
   font-size: 72px;
   background: linear-gradient(135deg, #f9536b, #fda085);
 }
+.cover-melon { background: linear-gradient(135deg, #7bd88f 0%, #2e8b57 100%); }
 .cover-carrot { background: linear-gradient(135deg, #a8e063 0%, #56ab2f 100%); }
 
 .game-info { padding: 18px 20px 22px; }
